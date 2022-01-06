@@ -14,6 +14,9 @@ static int fullscreen = 0;
 static vec2 resolution = {800.0, 600.0};
 static vec2 mouse;
 
+static array_t *circles, *cirColor, *cirVels;
+static array_t *triangles, *triColor;
+
 static unsigned int shaderBack, shaderCircle, shaderTri;
 static unsigned int indices[3] = {0, 1, 2};
 static unsigned int quadVAO, triVAO;
@@ -22,6 +25,12 @@ void triangle_bind(Tri2D* tri)
 {
     glee_buffer_create_indexed(triVAO, tri, sizeof(Tri2D), &indices[0], sizeof(indices));
     glee_buffer_attribute_set(0, 2, 0, 0);
+}
+
+vec2 vec2_lerp(vec2 v1, vec2 v2)
+{
+    vec2 v = {lerpf(v1.x, v2.x, 0.5), lerpf(v1.y, v2.y, 0.5)};
+    return v;
 }
 
 vec2 world_to_screen(vec2 p)
@@ -52,11 +61,9 @@ int intersect_edge(Circle* cir, vec2 a, vec2 b, vec2* n)
         float len = e.x * e.x + e.y * e.y;
         k = k * k / len;
 
-        if (k < len) {
-            if (c.x * c.x + c.y * c.y - k <= cir->radius * cir->radius) {
-                *n = vec2_norm(vec2_cross(b, a));
-                return 1;
-            }
+        if (k < len && c.x * c.x + c.y * c.y - k <= cir->radius * cir->radius) {
+            *n = vec2_normal(vec2_cross(b, a));
+            return 1;
         }
     }
     return 0;
@@ -64,16 +71,169 @@ int intersect_edge(Circle* cir, vec2 a, vec2 b, vec2* n)
 
 int intersect(Tri2D* tri, Circle* cir, vec2* n)
 {
-    return (intersect_edge(cir, tri->a, tri->b, n) || 
-            intersect_edge(cir, tri->b, tri->c, n) || 
+    return (intersect_edge(cir, tri->a, tri->b, n) ||
+            intersect_edge(cir, tri->b, tri->c, n) ||
             intersect_edge(cir, tri->c, tri->a, n));
+}
+
+void vertex_add()
+{
+    static unsigned int verts = 0;
+    static vec2 tri[3];
+
+    tri[(++verts) - 1] = mouse;
+    if (verts > 2) {
+        vec4 c = {randf_norm(), randf_norm(), randf_norm(), 1.0};
+        array_push(triColor, &c);
+        array_push(triangles, &tri[0]);
+        verts = 0;
+    }
+}
+
+void circle_add()
+{
+    Circle cr = circle_new(mouse, 40.0 * randf_norm() + 10.0);
+    vec4 c = {randf_norm(), randf_norm(), randf_norm(), 1.0};
+    vec2 v = {0.0, 0.0};
+    array_push(circles, &cr);
+    array_push(cirColor, &c);
+    array_push(cirVels, &v);
+}
+
+void draw_background(float t)
+{
+    glBindVertexArray(quadVAO);
+    glUseProgram(shaderBack);
+    glee_shader_uniform_set(shaderBack, 1, "u_time", &t);
+    glee_shader_uniform_set(shaderBack, 2, "u_mouse", &mouse);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+}
+
+void update_triangles()
+{
+    glUseProgram(shaderTri);
+    glBindVertexArray(triVAO);
+    for (int i = 0; i < triangles->used; i++) {
+        Tri2D* triangle = (Tri2D*)triangles->data + i;
+        vec4* c = (vec4*)triColor->data + i;
+        
+        Tri2D t1 = {
+            screen_to_world(triangle->a),
+            screen_to_world(triangle->b),
+            screen_to_world(triangle->c),
+        };
+
+        triangle_bind(&t1);
+        glee_shader_uniform_set(shaderTri, 4, "u_color", c);
+        glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_INT, 0);
+    }
+}
+
+void update_circles(float deltaTime)
+{
+    glUseProgram(shaderCircle);
+    glBindVertexArray(quadVAO);
+    const int len = circles->used, tlen = triangles->used;
+    for (int i = 0; i < len; i++) {
+        Circle* circle = (Circle*)circles->data + i;
+        vec4* c = (vec4*)cirColor->data + i;
+        vec2* vel = (vec2*)cirVels->data + i;
+
+        // Circle collision
+        for (int j = 0; j < len; j++) {
+            if (i == j) continue;
+            
+            Circle* c2 = (Circle*)circles->data + j;
+            vec2* vel2 = (vec2*)cirVels->data + j;
+            vec2 g = vec2_norm(vec2_sub(c2->pos, circle->pos));
+
+            //vec2 vdif = vec2_sub(vec2_mult(*vel, deltaTime * force), vec2_mult(*vel2, deltaTime * force));
+
+            if (circle_overlap_offset(*circle, *c2, *vel)) {
+                //inters++;
+                float M = circle->radius * c2->radius;
+                vec2 v1 = *vel, v2 = *vel2;
+
+                vel->x = ((circle->radius - c2->radius) / M) * v1.x + ((2.0 * c2->radius) / M) * v2.x;
+                vel->y = ((circle->radius - c2->radius) / M) * v1.y + ((2.0 * c2->radius) / M) * v2.y;
+                float mag1 = vec2_mag(*vel);
+                vec2 dir1 = vec2_mult(g, -mag1);
+
+                vel2->x = ((c2->radius - circle->radius) / M) * v2.x + ((2.0 * circle->radius) / M) * v1.x;
+                vel2->y = ((c2->radius - circle->radius) / M) * v2.y + ((2.0 * circle->radius) / M) * v1.y;
+                float mag2 = vec2_mag(*vel2);
+                vec2 dir2 = vec2_mult(g, mag2);
+
+                //*vel = vec2_mult(vec2_norm(vec2_lerp(dir1, *vel)), mag1);
+                //*vel2 = vec2_mult(vec2_norm(vec2_lerp(dir2, *vel2)), mag2);
+            }
+
+            while(circle_overlap(*circle, *c2)) {
+                vel->x -= g.x;
+                vel->y -= g.y;
+                circle->pos.x -= g.x;
+                circle->pos.y -= g.y;
+                c2->pos.x += g.x;
+                c2->pos.y += g.y;
+            }
+        }
+
+        // Triangle collision
+        vec2 n;
+        int inters = 0;
+        for (int j = 0; j < tlen; j++) {
+            Tri2D* T = (Tri2D*)triangles->data + j;
+            while (intersect(T, circle, &n)) {
+                circle->pos.x += n.x;
+                circle->pos.y += n.y;
+                inters++;
+            }
+            if (inters) {
+                *vel = vec2_reflect(*vel, n);
+                break;
+            }
+        }
+        
+        if (!inters) vel->y -= gravity * deltaTime;
+
+        circle->pos.x += vel->x * deltaTime * force;
+        circle->pos.y += vel->y * deltaTime * force;
+
+        glee_shader_uniform_set(shaderCircle, 3, "u_pos", circle);
+        glee_shader_uniform_set(shaderCircle, 4, "u_color", c);
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+    }
+}
+
+void scene_deinit()
+{
+    array_destroy(circles);
+    array_destroy(cirColor);
+    array_destroy(cirVels);
+    array_destroy(triangles);
+    array_destroy(triColor);
+}
+
+void scene_init(unsigned int size)
+{
+    circles = array_new(size, sizeof(Circle));
+    cirColor = array_new(size, sizeof(vec4));
+    cirVels = array_new(size, sizeof(vec2));
+    triangles = array_new(size, sizeof(Tri2D));
+    triColor = array_new(size, sizeof(vec4));
+}
+
+void scene_reinit()
+{
+    array_free(circles);
+    array_free(cirColor);
+    array_free(cirVels);
+    array_free(triangles);
+    array_free(triColor);
 }
 
 int main(int argc, char** argv)
 {
-
-    int count = 1;
-
     if (argc > 1) {
         if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "-help")) {
             printf("---------------- BOUNCE -----------------\n");
@@ -85,54 +245,13 @@ int main(int argc, char** argv)
             resolution.x = 1440.0;
             resolution.y = 960.0;
             fullscreen++;
-            if (argc > 2) count = atoi(argv[2]);
         }
-        else count = atoi(argv[1]);
     }
 
     srand(time(NULL));
     rand_seed(rand());
 
-    unsigned int circleCount, triangleCount;
-    circleCount = triangleCount = count;
-    array_t* circles = array_new(circleCount, sizeof(Circle));
-    array_t* cirColor = array_new(circleCount, sizeof(vec4));
-    array_t* cirVels = array_new(circleCount, sizeof(vec2));
-    array_t* triangles = array_new(triangleCount, sizeof(Tri2D));
-    array_t* triColor = array_new(triangleCount, sizeof(vec4));
-    
-    Tri2D tri;
-    tri.a = world_to_screen(vec2_new(1.0, -1.0));
-    tri.b = world_to_screen(vec2_new(0.0, -0.8));
-    tri.c = world_to_screen(vec2_new(-1.0, -1.0));
-    array_push(triangles, &tri);
-
-    Circle cir;
-    cir.pos = world_to_screen(vec2_new(randf_signed(), randf_norm()));
-    cir.radius = (randf_norm() * 0.1 + 0.01) * resolution.y;
-    array_push(circles, &cir);
-
-    for (int i = 0; i < circles->used; i++) {
-        vec4 c, v = {0.0, 0.0};
-        c.x = randf_norm();
-        c.y = randf_norm();
-        c.z = randf_norm();
-        c.w = 1.0;
-        array_push(cirColor, &c);
-        array_push(cirVels, &v);
-    }
-
-    for (int i = 0; i < triangles->used; i++) {
-        vec4 c;
-        c.x = randf_norm();
-        c.y = randf_norm();
-        c.z = randf_norm();
-        c.w = 1.0;
-        array_push(triColor, &c);
-    }
-
-    printf("Circles: %d of %d\n", circles->used, circles->size);
-    printf("Triangles: %d of %d\n", triangles->used, triangles->size);
+    scene_init(16);
 
     //Glee Init
     glee_init();
@@ -147,7 +266,6 @@ int main(int argc, char** argv)
 
     shaderCircle = glee_shader_load("shaders/vert.glsl", "shaders/circle.glsl");
     glee_shader_uniform_set(shaderCircle, 2, "u_resolution", &resolution);
-    glee_shader_uniform_set(shaderCircle, 3, "u_pos", &cir);
 
     shaderTri = glee_shader_load("shaders/vert.glsl", "shaders/triangle.glsl");
     glee_shader_uniform_set(shaderTri, 2, "u_resolution", &resolution);
@@ -163,74 +281,20 @@ int main(int argc, char** argv)
         Tri2D* triangle = triangles->data;
 
         if (glee_key_pressed(GLFW_KEY_ESCAPE)) break;
-        if (glee_key_pressed(GLFW_KEY_R)) {
-            circle->pos = world_to_screen(vec2_new(randf_signed(), randf_norm()));
-            *vel = vec2_uni(0.0);
-        }
+        if (glee_key_pressed(GLFW_KEY_R)) scene_reinit();
         glee_mouse_pos(&mouse.x, &mouse.y);
-        if (glee_mouse_down(GLFW_MOUSE_BUTTON_LEFT)) {
-            circle->pos = mouse;
-            *vel = vec2_uni(0.0);
-        }
+        
+        if (glee_key_pressed(GLFW_KEY_B)) circle_add();
+        if (glee_key_pressed(GLFW_KEY_V)) vertex_add();
 
-        // Update
-        vec2 n;
-        int inters = intersect(triangle, circle, &n);
-        if (!inters) {
-            vel->y -= gravity * deltaTime;
-        } else {
-
-            *vel = vec2_reflect(*vel, n);
-
-            vec4* c = cirColor->data;
-            c->x = 1.0 - c->x;
-            c->y = 1.0 - c->y;
-            c->z = 1.0 - c->z;
-        }
-
-        circle->pos.x += vel->x * deltaTime * force;
-        circle->pos.y += vel->y * deltaTime * force;
-
-        // Draw background
-        glUseProgram(shaderBack);
-        glee_shader_uniform_set(shaderBack, 1, "u_time", &t);
-        glee_shader_uniform_set(shaderBack, 2, "u_mouse", &mouse);
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-
-        // Triangles
-        glUseProgram(shaderTri);
-        glBindVertexArray(triVAO);
-        for (int i = 0; i < triangles->used; i++) {
-            Tri2D* triangle = (Tri2D*)triangles->data + i;
-            vec4* c = (vec4*)triColor->data + i;
-            
-            Tri2D t1 = {
-                screen_to_world(triangle->a),
-                screen_to_world(triangle->b),
-                screen_to_world(triangle->c),
-            };
-
-            triangle_bind(&t1);
-            glee_shader_uniform_set(shaderTri, 4, "u_color", c);
-            glDrawElements(GL_TRIANGLES, 3, GL_UNSIGNED_INT, 0);
-        }
-
-        // Circles
-        glUseProgram(shaderCircle);
-        glBindVertexArray(quadVAO);
-        for (int i = 0; i < circles->used; i++) {
-            Circle* circle = (Circle*)circles->data + i;
-            vec4* c = (vec4*)cirColor->data + i;
-
-            glee_shader_uniform_set(shaderCircle, 3, "u_pos", circle);
-            glee_shader_uniform_set(shaderCircle, 4, "u_color", c);
-            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
-        }
+        draw_background(t);
+        update_circles(deltaTime);
+        update_triangles();
 
         glee_screen_refresh();
     }
 
+    scene_deinit();
     glee_deinit();
     return EXIT_SUCCESS;
-
 }
